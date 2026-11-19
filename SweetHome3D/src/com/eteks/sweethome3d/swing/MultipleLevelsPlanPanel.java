@@ -665,6 +665,10 @@ public class MultipleLevelsPlanPanel extends JPanel implements PlanView, Printab
     return this.planComponent.print(graphics, pageFormat, pageIndex);
   }
 
+  PlanComponent getPlanComponent() {
+    return this.planComponent;
+  }
+
   /**
    * Returns the preferred scale to print the plan component.
    */

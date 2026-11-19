@@ -104,6 +104,7 @@ import java.util.Set;
 import java.util.WeakHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.function.DoubleConsumer;
 
 import javax.imageio.ImageIO;
 import javax.media.j3d.AmbientLight;
@@ -298,9 +299,10 @@ public class PlanComponent extends JComponent implements PlanView, Scrollable, P
   private Map<TextStyle, FontMetrics>       fontsMetrics;
   
   private Rectangle2D                       planBoundsCache;  
+  private long                              printRevision;
   private boolean                           planBoundsCacheValid = false;  
   private BufferedImage                     backgroundImageCache;
-  private Map<TextureImage, BufferedImage>  patternImagesCache;
+  private Map<TextureImage, BufferedImage>  patternImagesCache = new HashMap<TextureImage, BufferedImage>();
   private List<Wall>                        otherLevelsWallsCache;
   private Area                              otherLevelsWallAreaCache;
   private List<Room>                        otherLevelsRoomsCache;
@@ -626,10 +628,37 @@ public class PlanComponent extends JComponent implements PlanView, Scrollable, P
     this.panningCursor = createCustomCursor("resources/cursors/panning16x16.png",
         "resources/cursors/panning32x32.png", "Panning cursor", Cursor.HAND_CURSOR);
     this.duplicationCursor = DragSource.DefaultCopyDrop;
-    this.patternImagesCache = new HashMap<TextureImage, BufferedImage>();
     // Install default colors using same colors as a text field
     super.setForeground(UIManager.getColor("TextField.foreground"));
     super.setBackground(UIManager.getColor("TextField.background"));
+  }
+
+  /**
+   * Creates a detached renderer without editor listeners or tooltip windows.
+   */
+  private PlanComponent(Home printHome, PlanComponent source) {
+    this.home = printHome;
+    this.preferences = source.preferences;
+    this.backgroundPainted = source.backgroundPainted;
+    this.rotationCursor = source.rotationCursor;
+    this.elevationCursor = source.elevationCursor;
+    this.heightCursor = source.heightCursor;
+    this.powerCursor = source.powerCursor;
+    this.resizeCursor = source.resizeCursor;
+    this.moveCursor = source.moveCursor;
+    this.panningCursor = source.panningCursor;
+    this.duplicationCursor = source.duplicationCursor;
+    setForeground(source.getForeground());
+    setBackground(source.getBackground());
+    setFont(source.getFont());
+  }
+
+  long getPrintRevision() {
+    return this.printRevision;
+  }
+
+  PlanComponent createPrintSnapshot(Home printHome) {
+    return new PlanComponent(printHome, this);
   }
 
   /**
@@ -653,11 +682,13 @@ public class PlanComponent extends JComponent implements PlanView, Scrollable, P
             for (HomePieceOfFurniture piece : getFurnitureWithoutGroups((HomePieceOfFurniture)ev.getSource())) {
               furnitureTopViewIconsCache.remove(piece);
             }
+            printRevision++;
             repaint();
           } else if (HomePieceOfFurniture.Property.ELEVATION.name().equals(ev.getPropertyName())
                      || HomePieceOfFurniture.Property.LEVEL.name().equals(ev.getPropertyName())
                      || HomePieceOfFurniture.Property.HEIGHT.name().equals(ev.getPropertyName())) {
             sortedLevelFurniture = null;
+            printRevision++;
             repaint();
           } else {
             revalidate();
@@ -720,6 +751,7 @@ public class PlanComponent extends JComponent implements PlanView, Scrollable, P
             otherLevelsWallAreaCache = null;
             otherLevelsWallsCache = null;
             wallAreasCache = null;
+            printRevision++;
             repaint();
           }
         }
@@ -764,6 +796,7 @@ public class PlanComponent extends JComponent implements PlanView, Scrollable, P
                      && (Room.Property.FLOOR_COLOR.name().equals(propertyName)
                          || Room.Property.FLOOR_TEXTURE.name().equals(propertyName)
                          || Room.Property.FLOOR_VISIBLE.name().equals(propertyName))) {
+            printRevision++;
             repaint(); 
           }
         }
@@ -791,6 +824,7 @@ public class PlanComponent extends JComponent implements PlanView, Scrollable, P
            String propertyName = ev.getPropertyName();
            if (Polyline.Property.COLOR.name().equals(propertyName)
                || Polyline.Property.DASH_STYLE.name().equals(propertyName)) {
+             printRevision++;
              repaint();
            } else {
              revalidate();
@@ -854,6 +888,7 @@ public class PlanComponent extends JComponent implements PlanView, Scrollable, P
     // Add listener to update plan when levels change
     final PropertyChangeListener levelChangeListener = new PropertyChangeListener() {
         public void propertyChange(PropertyChangeEvent ev) {
+          printRevision++;
           String propertyName = ev.getPropertyName();
           if (Level.Property.BACKGROUND_IMAGE.name().equals(propertyName)) {
             backgroundImageCache = null;
@@ -928,6 +963,7 @@ public class PlanComponent extends JComponent implements PlanView, Scrollable, P
       new PropertyChangeListener() {
         public void propertyChange(PropertyChangeEvent ev) {
           backgroundImageCache = null;
+          printRevision++;
           repaint();
         }
       });
@@ -1045,6 +1081,9 @@ public class PlanComponent extends JComponent implements PlanView, Scrollable, P
    * and updates viewport position if this component is displayed in a scrolled pane.
    */
   private void revalidate(boolean invalidatePlanBoundsCache) {
+    if (invalidatePlanBoundsCache) {
+      this.printRevision++;
+    }
     boolean planBoundsCacheWereValid = this.planBoundsCacheValid;
     final float planBoundsMinX = (float)getPlanBounds().getMinX();
     final float planBoundsMinY = (float)getPlanBounds().getMinY();
@@ -1943,20 +1982,20 @@ public class PlanComponent extends JComponent implements PlanView, Scrollable, P
   public float getPrintPreferredScale(Graphics g, PageFormat pageFormat) {
     List<Selectable> printedItems = getPaintedItems(); 
     Rectangle2D printedItemBounds = getItemsBounds(g, printedItems);
-    if (printedItemBounds != null) {
-      float imageableWidthCm = LengthUnit.inchToCentimeter((float)pageFormat.getImageableWidth() / 72);
-      float imageableHeightCm = LengthUnit.inchToCentimeter((float)pageFormat.getImageableHeight() / 72);
-      float extraMargin = getStrokeWidthExtraMargin(printedItems, PaintMode.PRINT);
-      // Compute the largest integer scale possible
-      int scaleInverse = (int)Math.ceil(Math.max(
-          (printedItemBounds.getWidth() + 2 * extraMargin) / imageableWidthCm,
-          (printedItemBounds.getHeight() + 2 * extraMargin) / imageableHeightCm));
-      return 1f / scaleInverse;
-    } else {
+    if (printedItemBounds == null) {
       return 0;
     }
+    return 1f / (float)Math.ceil(getPrintScaleInverse(printedItemBounds,
+        getStrokeWidthExtraMargin(printedItems, PaintMode.PRINT), pageFormat));
   }
-  
+
+  private double getPrintScaleInverse(Rectangle2D bounds, float margin, PageFormat pageFormat) {
+    float imageableWidthCm = LengthUnit.inchToCentimeter((float)pageFormat.getImageableWidth() / 72);
+    float imageableHeightCm = LengthUnit.inchToCentimeter((float)pageFormat.getImageableHeight() / 72);
+    return Math.max((bounds.getWidth() + 2 * margin) / imageableWidthCm,
+        (bounds.getHeight() + 2 * margin) / imageableHeightCm);
+  }
+
   /**
    * Returns the margin that should be added around home items bounds to ensure their
    * line stroke width is always fully visible.
@@ -2008,73 +2047,119 @@ public class PlanComponent extends JComponent implements PlanView, Scrollable, P
    * that makes it fill <code>pageFormat</code> imageable size if this attribute is <code>null</code>.
    */
   public int print(Graphics g, PageFormat pageFormat, int pageIndex) {
-    List<Selectable> printedItems = getPaintedItems(); 
-    Rectangle2D printedItemBounds = getItemsBounds(g, printedItems);
-    if (printedItemBounds != null) {
-      double imageableX = pageFormat.getImageableX();
-      double imageableY = pageFormat.getImageableY();
-      double imageableWidth = pageFormat.getImageableWidth();
-      double imageableHeight = pageFormat.getImageableHeight();
-      float printScale;
-      float rowIndex;
-      float columnIndex;
-      int pagesPerRow;
-      int pagesPerColumn;
-      if (this.home.getPrint() == null || this.home.getPrint().getPlanScale() == null) {
-        // Compute a scale that ensures the plan will fill the component if plan scale is null
-        printScale = getPrintPreferredScale(g, pageFormat) * LengthUnit.centimeterToInch(72);
-        if (pageIndex > 0) {
-          return NO_SUCH_PAGE;
-        }
-        pagesPerRow = 1;
-        pagesPerColumn = 1;
-        rowIndex   = 0;
-        columnIndex = 0;
-      } else {
-        // Apply print scale to paper size expressed in 1/72nds of an inch
-        printScale = this.home.getPrint().getPlanScale().floatValue() * LengthUnit.centimeterToInch(72);
-        pagesPerRow = (int)(printedItemBounds.getWidth() * printScale / imageableWidth);
-        if (printedItemBounds.getWidth() * printScale != imageableWidth) {
-          pagesPerRow++;
-        }
-        pagesPerColumn = (int)(printedItemBounds.getHeight() * printScale / imageableHeight);
-        if (printedItemBounds.getHeight() * printScale != imageableHeight) {
-          pagesPerColumn++;
-        }
-        if (pageIndex >= pagesPerRow * pagesPerColumn) {
-          return NO_SUCH_PAGE;
-        }
-        rowIndex = pageIndex / pagesPerRow;
-        columnIndex = pageIndex - rowIndex * pagesPerRow;
-      }
-          
-      Graphics2D g2D = (Graphics2D)g.create();
-      g2D.clip(new Rectangle2D.Double(imageableX, imageableY, imageableWidth, imageableHeight));
-      // Change coordinates system to paper imageable origin
-      g2D.translate(imageableX - columnIndex * imageableWidth, imageableY - rowIndex * imageableHeight);
-      g2D.scale(printScale, printScale);
-      float extraMargin = getStrokeWidthExtraMargin(printedItems, PaintMode.PRINT);
-      g2D.translate(-printedItemBounds.getMinX() + extraMargin,
-          -printedItemBounds.getMinY() + extraMargin);
-      // Center plan in component if possible
-      g2D.translate(Math.max(0, 
-              (imageableWidth * pagesPerRow / printScale - printedItemBounds.getWidth() - 2 * extraMargin) / 2), 
-          Math.max(0, 
-              (imageableHeight * pagesPerColumn / printScale - printedItemBounds.getHeight() - 2 * extraMargin) / 2));
-      setRenderingHints(g2D);
-      try {
-        // Print component contents
-        paintContent(g2D, printScale, PaintMode.PRINT);
-      } catch (InterruptedIOException ex) {
-        // Ignore exception because it may happen only in EXPORT paint mode 
-      }   
-      g2D.dispose();
-      return PAGE_EXISTS;
-    } else {
+    return print(g, pageFormat, pageIndex, null);
+  }
+
+  int print(Graphics g, PageFormat pageFormat, int pageIndex, DoubleConsumer scaleUsed) {
+    if (pageIndex < 0) {
       return NO_SUCH_PAGE;
     }
+
+    List<Level> levels = this.home.getLevels();
+    if (levels.isEmpty()) {
+      return printSelectedPlan(g, pageFormat, pageIndex, false, scaleUsed);
+    }
+
+    if (pageIndex >= levels.size()) {
+      return NO_SUCH_PAGE;
+    }
+
+    Home printHome = this.home.clone();
+    int viewablePageIndex = 0;
+    for (Level level : printHome.getLevels()) {
+      if (level.isViewable() && viewablePageIndex++ == pageIndex) {
+        printHome.setSelectedLevel(level);
+        PlanComponent printPlan = new PlanComponent(printHome, this);
+        return printPlan.printSelectedPlan(g, pageFormat, 0, true, scaleUsed);
+      }
+    }
+    return NO_SUCH_PAGE;
   }
-  
+
+  private int printSelectedPlan(Graphics g, PageFormat pageFormat, int pageIndex, boolean singlePage,
+                                DoubleConsumer scaleUsed) {
+    List<Selectable> printedItems = getPaintedItems();
+    if (singlePage) {
+      // Use the same level membership rules as the plan painter.
+      printedItems.removeIf(item -> item instanceof Elevatable
+          && !isViewableAtSelectedLevel((Elevatable)item));
+    }
+    Rectangle2D bounds = getItemsBounds(g, printedItems);
+    if (singlePage && this.backgroundPainted) {
+      BackgroundImage backgroundImage = getPlanBackgroundImage();
+      if (backgroundImage != null && backgroundImage.isVisible()) {
+        // The detached renderer reuses this decoded image when it paints the page.
+        this.backgroundImageCache = readBackgroundImage(backgroundImage.getImage(), OperatingSystem.isMacOSX());
+        if (this.backgroundImageCache != null) {
+          Rectangle2D imageBounds = new Rectangle2D.Double(-backgroundImage.getXOrigin(), -backgroundImage.getYOrigin(),
+              this.backgroundImageCache.getWidth() * backgroundImage.getScale(),
+              this.backgroundImageCache.getHeight() * backgroundImage.getScale());
+          bounds = bounds == null ? imageBounds : bounds.createUnion(imageBounds);
+        }
+      }
+    }
+    if (bounds == null) {
+      return singlePage ? PAGE_EXISTS : NO_SUCH_PAGE;
+    }
+
+    double imageableX = pageFormat.getImageableX();
+    double imageableY = pageFormat.getImageableY();
+    double imageableWidth = pageFormat.getImageableWidth();
+    double imageableHeight = pageFormat.getImageableHeight();
+    float margin = getStrokeWidthExtraMargin(printedItems, PaintMode.PRINT);
+    Float configuredScale = this.home.getPrint() == null ? null : this.home.getPrint().getPlanScale();
+    float pointsPerCentimeter = LengthUnit.centimeterToInch(72);
+    float printScale;
+    int pagesPerRow = 1;
+    int pagesPerColumn = 1;
+    if (configuredScale == null) {
+      if (pageIndex > 0) {
+        return NO_SUCH_PAGE;
+      }
+      printScale = pointsPerCentimeter / (float)Math.ceil(getPrintScaleInverse(bounds, margin, pageFormat));
+    } else if (singlePage) {
+      // Retain the chosen scale when it fits, but reserve only one page per level.
+      printScale = (float)Math.min(configuredScale, 1 / getPrintScaleInverse(bounds, margin, pageFormat))
+          * pointsPerCentimeter;
+    } else {
+      // Preserve fixed-scale tiling for homes without explicit levels.
+      printScale = configuredScale * pointsPerCentimeter;
+      pagesPerRow = (int)(bounds.getWidth() * printScale / imageableWidth);
+      if (bounds.getWidth() * printScale != imageableWidth) {
+        pagesPerRow++;
+      }
+      pagesPerColumn = (int)(bounds.getHeight() * printScale / imageableHeight);
+      if (bounds.getHeight() * printScale != imageableHeight) {
+        pagesPerColumn++;
+      }
+      if (pageIndex >= pagesPerRow * pagesPerColumn) {
+        return NO_SUCH_PAGE;
+      }
+    }
+
+    if (scaleUsed != null) {
+      scaleUsed.accept((double)printScale / pointsPerCentimeter);
+    }
+    int rowIndex = pageIndex / pagesPerRow;
+    int columnIndex = pageIndex % pagesPerRow;
+    Graphics2D g2D = (Graphics2D)g.create();
+    try {
+      g2D.clip(new Rectangle2D.Double(imageableX, imageableY, imageableWidth, imageableHeight));
+      g2D.translate(imageableX - columnIndex * imageableWidth, imageableY - rowIndex * imageableHeight);
+      g2D.scale(printScale, printScale);
+      g2D.translate(-bounds.getMinX() + margin, -bounds.getMinY() + margin);
+      g2D.translate(Math.max(0, (imageableWidth * pagesPerRow / printScale - bounds.getWidth() - 2 * margin) / 2),
+          Math.max(0, (imageableHeight * pagesPerColumn / printScale - bounds.getHeight() - 2 * margin) / 2));
+      setRenderingHints(g2D);
+      paintContent(g2D, printScale, PaintMode.PRINT);
+    } catch (InterruptedIOException ex) {
+      // This checked exception is used only in EXPORT paint mode.
+    } finally {
+      g2D.dispose();
+    }
+    return PAGE_EXISTS;
+  }
+
   /**
    * Returns an image of the selected items displayed by this component 
    * (camera excepted) with no outline at scale 1/1 (1 pixel = 1cm).
@@ -2195,10 +2280,7 @@ public class PlanComponent extends JComponent implements PlanView, Scrollable, P
     }
   }
 
-  /**
-   * Paints background image and returns <code>true</code> if an image is painted.
-   */
-  private boolean paintBackgroundImage(Graphics2D g2D, PaintMode paintMode) {
+  private BackgroundImage getPlanBackgroundImage() {
     Level selectedLevel = this.home.getSelectedLevel();
     Level backgroundImageLevel = null;
     if (selectedLevel != null) { 
@@ -2216,9 +2298,14 @@ public class PlanComponent extends JComponent implements PlanView, Scrollable, P
         }
       }
     }
-    final BackgroundImage backgroundImage = backgroundImageLevel == null 
-        ? this.home.getBackgroundImage()
-        : backgroundImageLevel.getBackgroundImage();
+    return backgroundImageLevel == null ? this.home.getBackgroundImage() : backgroundImageLevel.getBackgroundImage();
+  }
+
+  /**
+   * Paints background image and returns <code>true</code> if an image is painted.
+   */
+  private boolean paintBackgroundImage(Graphics2D g2D, PaintMode paintMode) {
+    final BackgroundImage backgroundImage = getPlanBackgroundImage();
     if (backgroundImage != null && backgroundImage.isVisible()) {
       // Under Mac OS X, prepare background image with alpha because Java 5/6 doesn't always 
       // paint images correctly with alpha, and Java 7 blocks for some images
@@ -2289,12 +2376,18 @@ public class PlanComponent extends JComponent implements PlanView, Scrollable, P
       try {
         contentStream = imageContent.openStream();
         BufferedImage image = ImageIO.read(contentStream);
+        if (image == null) {
+          throw new IOException("Unsupported background image");
+        }
         if (prepareBackgroundImageWithAlpha) {
           BufferedImage backgroundImage = new BufferedImage(image.getWidth(), image.getHeight(), BufferedImage.TYPE_INT_ARGB);
-          Graphics2D g2D = (Graphics2D)backgroundImage.getGraphics();
-          g2D.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER, 0.7f));
-          g2D.drawRenderedImage(image, null);
-          g2D.dispose();
+          Graphics2D g2D = backgroundImage.createGraphics();
+          try {
+            g2D.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER, 0.7f));
+            g2D.drawRenderedImage(image, null);
+          } finally {
+            g2D.dispose();
+          }
           return backgroundImage;
         } else {
           return image;
@@ -2863,21 +2956,27 @@ public class PlanComponent extends JComponent implements PlanView, Scrollable, P
                     BufferedImage textureIconImage = new BufferedImage(
                         textureIcon.getIconWidth(), textureIcon.getIconHeight(), BufferedImage.TYPE_INT_ARGB);
                     Graphics2D g2DIcon = (Graphics2D)textureIconImage.getGraphics();
-                    textureIcon.paintIcon(this, g2DIcon, 0, 0);
-                    g2DIcon.dispose();
+                    try {
+                      textureIcon.paintIcon(this, g2DIcon, 0, 0);
+                    } finally {
+                      g2DIcon.dispose();
+                    }
                     if (floorTexture.getAngle() != 0) {
                       BufferedImage rotatedIconImage = new BufferedImage(
                           (int)Math.round(Math.abs(textureIconImage.getWidth() * cos) + Math.abs(textureIconImage.getHeight() * sin)), 
                           (int)Math.round(Math.abs(textureIconImage.getWidth() * sin) + Math.abs(textureIconImage.getHeight() * cos)), 
                           textureIconImage.getType());
                       g2DIcon = (Graphics2D)rotatedIconImage.getGraphics();
-                      g2DIcon.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY);
-                      g2DIcon.setPaint(new TexturePaint(textureIconImage, 
-                                      new Rectangle2D.Float(0, 0, textureIconImage.getWidth(), textureIconImage.getHeight())));
-                      g2DIcon.rotate(floorTexture.getAngle());
-                      float maxDimension = Math.max(rotatedIconImage.getWidth(), rotatedIconImage.getHeight());
-                      g2DIcon.fill(new Rectangle2D.Float(-maxDimension, -maxDimension, 3 * maxDimension, 3 * maxDimension));
-                      g2DIcon.dispose();
+                      try {
+                        g2DIcon.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY);
+                        g2DIcon.setPaint(new TexturePaint(textureIconImage,
+                                        new Rectangle2D.Float(0, 0, textureIconImage.getWidth(), textureIconImage.getHeight())));
+                        g2DIcon.rotate(floorTexture.getAngle());
+                        float maxDimension = Math.max(rotatedIconImage.getWidth(), rotatedIconImage.getHeight());
+                        g2DIcon.fill(new Rectangle2D.Float(-maxDimension, -maxDimension, 3 * maxDimension, 3 * maxDimension));
+                      } finally {
+                        g2DIcon.dispose();
+                      }
                       textureIconImage = rotatedIconImage;
                     }
 
@@ -6043,8 +6142,11 @@ public class PlanComponent extends JComponent implements PlanView, Scrollable, P
           // Create a monochrome icon from plan icon  
           BufferedImage image = new BufferedImage(getIconWidth(), getIconHeight(), BufferedImage.TYPE_INT_ARGB);
           Graphics imageGraphics = image.getGraphics();
-          super.paintIcon(c, imageGraphics, 0, 0);
-          imageGraphics.dispose();
+          try {
+            super.paintIcon(c, imageGraphics, 0, 0);
+          } finally {
+            imageGraphics.dispose();
+          }
           
           final int colorRed   = this.pieceColor & 0xFF0000;
           final int colorGreen = this.pieceColor & 0xFF00;
@@ -6090,8 +6192,11 @@ public class PlanComponent extends JComponent implements PlanView, Scrollable, P
               BufferedImage textureIconImage = new BufferedImage(
                   textureIcon.getIconWidth(), textureIcon.getIconHeight(), BufferedImage.TYPE_INT_ARGB);
               Graphics2D g2DIcon = (Graphics2D)textureIconImage.getGraphics();
-              textureIcon.paintIcon(c, g2DIcon, 0, 0);
-              g2DIcon.dispose();
+              try {
+                textureIcon.paintIcon(c, g2DIcon, 0, 0);
+              } finally {
+                g2DIcon.dispose();
+              }
               setTexturedIcon(c, textureIconImage, this.pieceTexture.getAngle());
             }
           }
@@ -6107,19 +6212,22 @@ public class PlanComponent extends JComponent implements PlanView, Scrollable, P
       // Paint plan icon in an image
       BufferedImage image = new BufferedImage(getIconWidth(), getIconHeight(), BufferedImage.TYPE_INT_ARGB);
       final Graphics2D imageGraphics = (Graphics2D)image.getGraphics();
-      imageGraphics.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY);
-      PieceOfFurniturePlanIcon.super.paintIcon(c, imageGraphics, 0, 0);     
-      
-      // Fill the pixels of plan icon with texture image
-      imageGraphics.setPaint(new TexturePaint(textureImage, 
-          new Rectangle2D.Float(0, 0, -getIconWidth() / this.pieceWidth * this.pieceTexture.getWidth(), 
-              -getIconHeight() / this.pieceDepth * this.pieceTexture.getHeight())));      
-      imageGraphics.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_IN));
-      imageGraphics.rotate(angle);
-      float maxDimension = Math.max(image.getWidth(), image.getHeight());
-      imageGraphics.fill(new Rectangle2D.Float(-maxDimension, -maxDimension, 3 * maxDimension, 3 * maxDimension));
-      imageGraphics.fillRect(0, 0, getIconWidth(), getIconHeight());                  
-      imageGraphics.dispose();
+      try {
+        imageGraphics.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY);
+        PieceOfFurniturePlanIcon.super.paintIcon(c, imageGraphics, 0, 0);
+
+        // Fill the pixels of plan icon with texture image
+        imageGraphics.setPaint(new TexturePaint(textureImage,
+            new Rectangle2D.Float(0, 0, -getIconWidth() / this.pieceWidth * this.pieceTexture.getWidth(),
+                -getIconHeight() / this.pieceDepth * this.pieceTexture.getHeight())));
+        imageGraphics.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_IN));
+        imageGraphics.rotate(angle);
+        float maxDimension = Math.max(image.getWidth(), image.getHeight());
+        imageGraphics.fill(new Rectangle2D.Float(-maxDimension, -maxDimension, 3 * maxDimension, 3 * maxDimension));
+        imageGraphics.fillRect(0, 0, getIconWidth(), getIconHeight());
+      } finally {
+        imageGraphics.dispose();
+      }
       
       setIcon(new ImageIcon(image));
     }
