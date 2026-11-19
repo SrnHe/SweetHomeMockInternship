@@ -22,6 +22,7 @@ package com.eteks.sweethome3d.swing;
 import java.awt.Font;
 import java.awt.Graphics;
 import java.awt.print.PageFormat;
+import java.awt.print.Printable;
 import java.awt.print.PrinterException;
 import java.io.IOException;
 import java.io.InterruptedIOException;
@@ -68,6 +69,12 @@ public class HomePDFPrinter {
     PageFormat pageFormat = HomePrintableComponent.getPageFormat(this.home.getPrint());
     Document pdfDocument = new Document(new Rectangle((float)pageFormat.getWidth(), (float)pageFormat.getHeight()));
     try {
+      HomePrintableComponent printableComponent =
+          new HomePrintableComponent(this.home, this.controller, this.defaultFont);
+      int pageCount = printableComponent.getPageCount(pageFormat);
+      if (pageCount == 0) {
+        throw new IOException("No printable pages");
+      }
       // Get a PDF writer that will write to the given PDF output stream
       PdfWriter pdfWriter = PdfWriter.getInstance(pdfDocument, outputStream);
       pdfDocument.open();
@@ -85,10 +92,8 @@ public class HomePDFPrinter {
       }
       
       PdfContentByte pdfContent = pdfWriter.getDirectContent();
-      HomePrintableComponent printableComponent = 
-          new HomePrintableComponent(this.home, this.controller, this.defaultFont);
       // Print each page
-      for (int page = 0, pageCount = printableComponent.getPageCount(); page < pageCount; page++) {
+      for (int page = 0; page < pageCount; page++) {
         // Check current thread isn't interrupted
         if (Thread.interrupted()) {
           throw new InterruptedIOException();
@@ -98,10 +103,14 @@ public class HomePDFPrinter {
         Graphics g = pdfTemplate.createGraphicsShapes((float)pageFormat.getWidth(), 
             (float)pageFormat.getHeight());        
         
-        printableComponent.print(g, pageFormat, page);
-        
+        try {
+          if (printableComponent.print(g, pageFormat, page) != Printable.PAGE_EXISTS) {
+            throw new PrinterException("Missing PDF page " + (page + 1));
+          }
+        } finally {
+          g.dispose();
+        }
         pdfContent.addTemplate(pdfTemplate, 0, 0);
-        g.dispose();
         
         if (page != pageCount - 1) {
           pdfDocument.newPage();

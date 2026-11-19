@@ -225,13 +225,15 @@ public class PrintPreviewPanel extends JPanel implements DialogView {
    * Updates components.
    */
   private void updateComponents() {
-    ActionMap actions = getActionMap();    
-    actions.get(ActionType.SHOW_PREVIOUS_PAGE).setEnabled(this.printableComponent.getPage() > 0);
-    actions.get(ActionType.SHOW_NEXT_PAGE).setEnabled(
-        this.printableComponent.getPage() < this.printableComponent.getPageCount() - 1);
+    ActionMap actions = getActionMap();
+    int pageCount = this.printableComponent.getPageCount();
+    int page = Math.min(this.printableComponent.getPage(), Math.max(0, pageCount - 1));
+    this.printableComponent.setPage(page);
+    this.printableComponent.repaint();
+    actions.get(ActionType.SHOW_PREVIOUS_PAGE).setEnabled(page > 0);
+    actions.get(ActionType.SHOW_NEXT_PAGE).setEnabled(page < pageCount - 1);
     this.pageLabel.setText(preferences.getLocalizedString(
-        PrintPreviewPanel.class, "pageLabel.text", 
-        this.printableComponent.getPage() + 1, this.printableComponent.getPageCount()));
+        PrintPreviewPanel.class, "pageLabel.text", pageCount == 0 ? 0 : page + 1, pageCount));
   }
 
   /**

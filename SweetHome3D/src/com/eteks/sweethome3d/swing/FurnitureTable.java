@@ -33,6 +33,7 @@ import java.awt.event.KeyEvent;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.awt.event.WindowEvent;
+import java.awt.image.BufferedImage;
 import java.awt.print.PageFormat;
 import java.awt.print.Printable;
 import java.awt.print.PrinterException;
@@ -42,7 +43,6 @@ import java.io.IOException;
 import java.io.StringWriter;
 import java.io.Writer;
 import java.lang.ref.WeakReference;
-import java.lang.reflect.InvocationTargetException;
 import java.math.BigDecimal;
 import java.text.DecimalFormat;
 import java.text.Format;
@@ -128,6 +128,7 @@ public class FurnitureTable extends JTable implements View, Printable {
   private UserPreferences        preferences;
   private ListSelectionListener  tableSelectionListener;
   private boolean                selectionByUser;
+  private long                   printRowRevision;
   private int                    furnitureInformationRow;
   private Popup                  furnitureInformationPopup;
   private AWTEventListener       informationPopupRemovalListener;
@@ -154,6 +155,7 @@ public class FurnitureTable extends JTable implements View, Printable {
       setRowHeight(Math.round(getRowHeight() * resolutionScale));
     }
     setModel(new FurnitureTreeTableModel(home));
+    getModel().addTableModelListener(ev -> this.printRowRevision++);
     setColumnModel(new FurnitureTableColumnModel(home, preferences));
     updateTableColumnsWidth(0);
     updateExpandedRows(home);
@@ -727,10 +729,45 @@ public class FurnitureTable extends JTable implements View, Printable {
    * Prints this component to make it fill <code>pageFormat</code> imageable size.
    */
   public int print(Graphics g, PageFormat pageFormat, int pageIndex) throws PrinterException {
-    // Create a printable column model from the column model of this table 
-    // with printable renderers for each column
+    return print(g, pageFormat, pageFormat, pageIndex);
+  }
+
+  int print(Graphics g, PageFormat firstPage, PageFormat followingPages, int pageIndex) throws PrinterException {
+    return pageIndex < 0 ? NO_SUCH_PAGE : printPages(g, firstPage, followingPages, pageIndex);
+  }
+
+  int getPrintPageCount(PageFormat firstPage, PageFormat followingPages) throws PrinterException {
+    return printPages(null, firstPage, followingPages, null);
+  }
+
+  long getPrintRowRevision() {
+    return this.printRowRevision;
+  }
+
+  List<Object> getPrintTableState() {
+    List<Object> state = new ArrayList<Object>();
+    state.add(getModel());
+    state.add(getFont());
+    state.add(getRowHeight());
+    state.add(getIntercellSpacing());
+    state.add(this.preferences.getLengthUnit());
+    for (TableColumn column : Collections.list(getColumnModel().getColumns())) {
+      state.add(column.getIdentifier());
+      state.add(column.getHeaderValue());
+      state.add(column.getCellRenderer());
+    }
+    return state;
+  }
+
+  private TableColumnModel createPrintableColumnModel() {
+    // Copy the visible columns and append the existing Level definition if it is hidden.
     DefaultTableColumnModel printableColumnModel = new DefaultTableColumnModel();
-    TableColumnModel columnModel = getColumnModel();
+    FurnitureTableColumnModel columnModel = (FurnitureTableColumnModel)getColumnModel();
+    List<TableColumn> columns = Collections.list(columnModel.getColumns());
+    TableColumn levelColumn = columnModel.availableColumns.get(HomePieceOfFurniture.SortableProperty.LEVEL);
+    if (columns.stream().noneMatch(column -> column.getIdentifier() == HomePieceOfFurniture.SortableProperty.LEVEL)) {
+      columns.add(levelColumn);
+    }
     final DefaultTableCellRenderer defaultRenderer = new DefaultTableCellRenderer();
     defaultRenderer.setHorizontalAlignment(DefaultTableCellRenderer.CENTER);
     TableCellRenderer printableHeaderRenderer = new TableCellRenderer() {
@@ -750,8 +787,7 @@ public class FurnitureTable extends JTable implements View, Printable {
           return headerRendererLabel;
         }
       };
-    for (int columnIndex = 0, n = columnModel.getColumnCount(); columnIndex < n; columnIndex++) {
-      final TableColumn tableColumn = columnModel.getColumn(columnIndex);
+    for (final TableColumn tableColumn : columns) {
       // Create a printable column from existing table column
       TableColumn printableColumn = new TableColumn();
       printableColumn.setIdentifier(tableColumn.getIdentifier());
@@ -779,71 +815,62 @@ public class FurnitureTable extends JTable implements View, Printable {
       printableColumn.setHeaderRenderer(printableHeaderRenderer);
       printableColumnModel.addColumn(printableColumn);
     }    
-    return print(g, pageFormat, pageIndex, printableColumnModel, Color.BLACK);
+    return printableColumnModel;
   }
 
   /**
-   * Prints this table in Event Dispatch Thread.
-  */
-  private int print(final Graphics g, 
-                    final PageFormat pageFormat, 
-                    final int pageIndex, 
-                    final TableColumnModel printableColumnModel,
-                    final Color gridColor) throws PrinterException {
-    if (EventQueue.isDispatchThread()) {
-      TableColumnModel oldColumnModel = getColumnModel();
-      Color oldGridColor = getGridColor();
-      setColumnModel(printableColumnModel);   
-      if (OperatingSystem.isWindows()) {
-        // Add 3 pixels to columns to get a correct rendering
-        updateTableColumnsWidth(3);
-      } else {
-        updateTableColumnsWidth(0);
-      }
-      setGridColor(gridColor);
+   * Counts or prints pages with one temporary Swing column model per operation.
+   */
+  private int printPages(final Graphics graphics, final PageFormat firstPage,
+                         final PageFormat followingPages, final Integer pageIndex) throws PrinterException {
+    if (!EventQueue.isDispatchThread()) {
+      return HomePrintableComponent.callOnPrintEDT(
+          () -> printPages(graphics, firstPage, followingPages, pageIndex));
+    }
+
+    if (getRowCount() == 0) {
+      return pageIndex == null ? 0 : NO_SUCH_PAGE;
+    }
+    TableColumnModel oldColumnModel = getColumnModel();
+    Color oldGridColor = getGridColor();
+    TableColumnModel printableColumns = createPrintableColumnModel();
+    try {
+      setColumnModel(printableColumns);
+      updateTableColumnsWidth(OperatingSystem.isWindows() ? 3 : 0);
+      setGridColor(Color.BLACK);
       Printable printable = getPrintable(PrintMode.FIT_WIDTH, null, null);
-      int pageExists = printable.print(g, pageFormat, pageIndex);
-      // Restore column model and grid color to their previous values
-      setColumnModel(oldColumnModel);
-      setGridColor(oldGridColor);
-      return pageExists;
-    } else {
-      // Print synchronously table in Event Dispatch Thread
-      // The best solution should be to be able to print out of Event Dispatch Thread
-      // a new instance of JTable customized with printableColumnModel and gridColor,
-      // but Swing refuses to print a JTable that isn't attached to a visible frame
-      class RunnableContext {
-        int pageExists;
-        PrinterException exception;
+      if (pageIndex != null && (pageIndex == 0
+          || (firstPage.getImageableHeight() == followingPages.getImageableHeight()
+              && firstPage.getImageableWidth() == followingPages.getImageableWidth()))) {
+        return printable.print(graphics, pageIndex == 0 ? firstPage : followingPages, pageIndex);
       }
-      
-      final RunnableContext context = new RunnableContext();
+
+      Graphics probe = new BufferedImage(1, 1, BufferedImage.TYPE_INT_RGB).getGraphics();
       try {
-        EventQueue.invokeAndWait(new Runnable() {
-            public void run() {
-              try {
-                context.pageExists = print(g, pageFormat, pageIndex, printableColumnModel, gridColor);
-              } catch (PrinterException ex) {
-                context.exception = ex;
-              }
-            }
-          });
-        if (context.exception != null) {
-          throw context.exception;
+        // JTable's paginator must advance through the first page using its own margins.
+        if (printable.print(probe, firstPage, 0) != PAGE_EXISTS) {
+          return pageIndex == null ? 0 : NO_SUCH_PAGE;
         }
-        return context.pageExists;
-      } catch (InterruptedException ex) {
-        throw new InterruptedPrinterException("Print interrupted");
-      } catch (InvocationTargetException ex) {
-        if (ex.getCause() instanceof RuntimeException) {
-          throw (RuntimeException)ex.getCause();
-        } else {
-          throw (Error)ex.getCause();
+        if (pageIndex != null) {
+          return printable.print(graphics, followingPages, pageIndex);
         }
+        int count = 1;
+        while (printable.print(probe, followingPages, count) == PAGE_EXISTS) {
+          count++;
+        }
+        return count;
+      } finally {
+        probe.dispose();
+      }
+    } finally {
+      try {
+        setColumnModel(oldColumnModel);
+      } finally {
+        setGridColor(oldGridColor);
       }
     }
   }
-  
+
   /**
    * Writes in the given stream the content of the table at CSV format.
    */
